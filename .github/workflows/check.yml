@@ -1,0 +1,21 @@
+name: Check 5km slots
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # каждый час, время UTC
+  workflow_dispatch:        # позволяет запустить руками для проверки
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: pip install -r requirements.txt
+      - run: playwright install --with-deps chromium
+      - run: python checker.py
+        env:
+          RR_TG_TOKEN: ${{ secrets.RR_TG_TOKEN }}
+          RR_TG_CHAT_ID: ${{ secrets.RR_TG_CHAT_ID }}
