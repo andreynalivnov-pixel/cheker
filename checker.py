@@ -39,6 +39,7 @@ Chromium), который полностью отрисовывает стран
 
 import argparse
 import os
+import re
 import sys
 import time
 from datetime import datetime
@@ -49,11 +50,15 @@ from playwright.sync_api import sync_playwright
 
 URL = "https://reg.russiarunning.com/event/Night_Yaroslavl26"
 
-# Варианты написания дистанции на странице
-DISTANCE_KEYWORDS = ["5 км", "5км", "5 km", "5KM", "5 KM"]
+# Ищем "5 км"/"5км"/"5 km", но НЕ как часть "15 км", "25 км", "45 км" и т.п.
+# (?<!\d) - перед "5" не должно быть другой цифры
+DISTANCE_PATTERN = re.compile(r"(?<!\d)5\s?(км|km)\b", re.IGNORECASE)
 
-# Слова-маркеры того, что слотов НЕТ (если не нашли - считаем, что слоты есть)
+# Слова-маркеры того, что слотов НЕТ или регистрация ещё не открыта
+# ("скоро" - реальный статус на russiarunning для дистанций, регистрация
+# на которые пока не началась, это тоже "недоступно", не путать с "есть слоты")
 SOLD_OUT_MARKERS = [
+    "скоро",
     "мест нет",
     "регистрация закрыта",
     "распродано",
@@ -62,6 +67,9 @@ SOLD_OUT_MARKERS = [
     "нет свободных мест",
     "регистрация завершена",
 ]
+
+# Положительный признак - на странице явно написано "Осталось N мест"
+POSITIVE_PATTERN = re.compile(r"осталось\s+\d+\s+мест", re.IGNORECASE)
 
 CHECK_INTERVAL_SECONDS = 60 * 60  # раз в час
 
@@ -78,27 +86,27 @@ def fetch_rendered_text(url: str, timeout_ms: int = 30000) -> str:
         return text
 
 
-def extract_distance_block(full_text: str, keyword: str, window: int = 500) -> Optional[str]:
-    """Вырезает кусок текста вокруг первого упоминания дистанции."""
-    idx = full_text.lower().find(keyword.lower())
-    if idx == -1:
+def find_5km_block(full_text: str, window: int = 500) -> Optional[str]:
+    """Находит первое НАСТОЯЩЕЕ упоминание "5 км" (не часть 15/25/45 км) и
+    вырезает кусок текста вокруг него."""
+    match = DISTANCE_PATTERN.search(full_text)
+    if not match:
         return None
+    idx = match.start()
     start = max(0, idx - window // 4)
     end = min(len(full_text), idx + window)
     return full_text[start:end]
 
 
-def find_5km_block(full_text: str) -> Optional[str]:
-    for kw in DISTANCE_KEYWORDS:
-        block = extract_distance_block(full_text, kw)
-        if block:
-            return block
-    return None
-
-
-def is_available(block: str) -> bool:
+def classify(block: str) -> str:
+    """Возвращает 'available', 'unavailable' или 'unknown'."""
     lower = block.lower()
-    return not any(marker in lower for marker in SOLD_OUT_MARKERS)
+    if POSITIVE_PATTERN.search(lower):
+        return "available"
+    for marker in SOLD_OUT_MARKERS:
+        if marker in lower:
+            return "unavailable"
+    return "unknown"
 
 
 def notify_telegram(message: str) -> None:
@@ -135,9 +143,14 @@ def check_once(debug: bool = False) -> bool:
     if debug:
         print(f"[{now}] Найденный фрагмент про 5 км:\n---\n{block}\n---")
 
-    available = is_available(block)
-    status = "ЕСТЬ свободные слоты (предположительно)" if available else "слотов нет / регистрация закрыта"
-    print(f"[{now}] Дистанция 5 км: {status}")
+    result = classify(block)
+    available = result == "available"
+    status_text = {
+        "available": "ЕСТЬ свободные слоты (нашли 'Осталось N мест')",
+        "unavailable": "слотов нет / регистрация закрыта / скоро",
+        "unknown": "статус НЕ ОПРЕДЕЛЁН (нет известных маркеров рядом - запустите --debug и пришлите фрагмент для уточнения)",
+    }[result]
+    print(f"[{now}] Дистанция 5 км: {status_text}")
 
     if available:
         notify_telegram(
