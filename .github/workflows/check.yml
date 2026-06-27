@@ -2,7 +2,7 @@ name: Check 5km slots
 
 on:
   schedule:
-    - cron: '13 * * * *'   # каждый час, время UTC
+    - cron: '*/5 * * * *'   # ВРЕМЕННО: тест, каждые 5 минут
   workflow_dispatch:        # позволяет запустить руками для проверки
 
 jobs:
@@ -19,3 +19,4 @@ jobs:
         env:
           RR_TG_TOKEN: ${{ secrets.RR_TG_TOKEN }}
           RR_TG_CHAT_ID: ${{ secrets.RR_TG_CHAT_ID }}
+          
