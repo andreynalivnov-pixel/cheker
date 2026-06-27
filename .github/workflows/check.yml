@@ -2,7 +2,7 @@ name: Check 5km slots
 
 on:
   schedule:
-    - cron: '0 * * * *'   # каждый час, время UTC
+    - cron: '13 * * * *'   # каждый час, время UTC
   workflow_dispatch:        # позволяет запустить руками для проверки
 
 jobs:
