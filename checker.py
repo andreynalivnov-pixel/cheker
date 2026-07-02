@@ -1,27 +1,6 @@
 #!/usr/bin/env python3
 """
 Чекер слотов на дистанцию 5 км для события Night_Yaroslavl26 (russiarunning.com)
-
-Страница регистрации - это JS-приложение (SPA), обычный HTTP-запрос отдаёт
-пустой каркас без данных. Поэтому скрипт использует Playwright (headless
-Chromium), который полностью отрисовывает страницу, как настоящий браузер.
-
-ВАЖНО: на странице может быть НЕСКОЛЬКО вариантов "5 км" (например, обычный
-и "5 км с футболкой" по другой цене). Скрипт находит и проверяет КАЖДЫЙ
-вариант отдельно и уведомляет, если хотя бы один из них открылся.
-
-УСТАНОВКА:
-    pip install playwright requests
-    playwright install chromium
-
-ИСПОЛЬЗОВАНИЕ:
-    python checker.py --debug   # разовая проверка с подробным выводом
-    python checker.py           # разовая проверка (для cron / GitHub Actions)
-    python checker.py --loop    # бесконечный цикл, проверка каждый час
-
-УВЕДОМЛЕНИЯ В TELEGRAM (опционально):
-    export RR_TG_TOKEN="ваш_токен"
-    export RR_TG_CHAT_ID="ваш_chat_id"
 """
 
 import argparse
@@ -30,24 +9,24 @@ import re
 import sys
 import time
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 
 import requests
 from playwright.sync_api import sync_playwright
 
 URL = "https://reg.russiarunning.com/event/Night_Yaroslavl26"
 
-# Якорь: ищем именно "Бег · 5 км" / "Бег · 5км" / "Бег · 5 km" - это
-# устойчивая подпись типа дистанции на странице регистрации russiarunning.
-# Привязка к "Бег ·" сама по себе исключает случайное совпадение с
-# "15 км"/"25 км"/"45 км" (после "·" сразу должна идти именно "5").
+# Якорь: "Бег · 5 км"
 ANCHOR_PATTERN = re.compile(r"бег\s*[·\-:]?\s*5\s?(км|km)\b", re.IGNORECASE)
 
-# Положительный признак - явно написано "Осталось N место/места/мест"
+# Паттерн начала СЛЕДУЮЩЕЙ строки с любой другой дистанцией ("Бег · 10 км" и т.п.)
+# По нему обрезаем блок статуса чтобы не захватить данные соседней дистанции
+NEXT_ROW_PATTERN = re.compile(r"бег\s*[·\-:]\s*\d", re.IGNORECASE)
+
+# Положительный признак
 POSITIVE_PATTERN = re.compile(r"осталось\s+\d+\s+мест[оа]?\b", re.IGNORECASE)
 
-# Маркеры того, что слотов НЕТ или регистрация ещё не/уже не открыта.
-# Подтверждено реальным текстом страницы: "Нет мест", "Регистрация закрыта".
+# Маркеры недоступности
 SOLD_OUT_MARKERS = [
     "нет мест",
     "мест нет",
@@ -59,29 +38,23 @@ SOLD_OUT_MARKERS = [
     "регистрация завершена",
 ]
 
-CHECK_INTERVAL_SECONDS = 60 * 60  # раз в час
-
-# Сколько символов брать до якоря (для названия варианта) и после (для статуса)
+CHECK_INTERVAL_SECONDS = 60 * 60
 BACK_WINDOW = 100
-FORWARD_WINDOW = 150
+FORWARD_WINDOW = 300
 
 
 def fetch_rendered_text(url: str, timeout_ms: int = 30000) -> str:
-    """Открывает страницу в headless-браузере и возвращает видимый текст body."""
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         page.goto(url, wait_until="networkidle", timeout=timeout_ms)
-        page.wait_for_timeout(2000)  # доп. время на отрисовку SPA
+        page.wait_for_timeout(2000)
         text = page.inner_text("body")
         browser.close()
         return text
 
 
 def find_5km_rows(full_text: str) -> List[dict]:
-    """Находит КАЖДОЕ упоминание "Бег · 5 км" и вырезает для каждого
-    отдельный блок: короткое название варианта (что было перед якорем)
-    и статус (что было после якоря)."""
     noise_indicators = [
         "регистрация", "закрыта", "нет мест", "осталось", "скоро",
         "бесплатно", "₽", "бег ·", "бег·", "распродано", "лист ожидания",
@@ -90,12 +63,17 @@ def find_5km_rows(full_text: str) -> List[dict]:
     for m in ANCHOR_PATTERN.finditer(full_text):
         back_start = max(0, m.start() - BACK_WINDOW)
         forward_end = min(len(full_text), m.end() + FORWARD_WINDOW)
-        title_raw = full_text[back_start:m.start()]
-        status_block = full_text[m.start():forward_end]
 
-        # Берём непустые строки перед якорем, отфильтровав служебные
-        # (статус/цену предыдущей строки таблицы), оставляем только
-        # похожие на настоящее название варианта дистанции.
+        title_raw = full_text[back_start:m.start()]
+
+        # Берём текст ПОСЛЕ якоря и обрезаем до начала следующей дистанции
+        after_anchor = full_text[m.end():forward_end]
+        next_row = NEXT_ROW_PATTERN.search(after_anchor)
+        if next_row:
+            after_anchor = after_anchor[:next_row.start()]
+
+        status_block = full_text[m.start():m.end()] + after_anchor
+
         title_lines = [l.strip() for l in title_raw.splitlines() if l.strip()]
         clean_lines = [
             l for l in title_lines
@@ -108,7 +86,6 @@ def find_5km_rows(full_text: str) -> List[dict]:
 
 
 def classify(block: str) -> str:
-    """Возвращает 'available', 'unavailable' или 'unknown'."""
     lower = block.lower()
     if POSITIVE_PATTERN.search(lower):
         return "available"
@@ -152,7 +129,7 @@ def check_once(debug: bool = False) -> bool:
     if not rows:
         print(f"[{now}] Не нашли ни одного варианта дистанции 5 км на странице.")
         if debug:
-            print("----- Начало текста страницы (для отладки, первые 3000 символов) -----")
+            print("----- Начало текста страницы (первые 3000 символов) -----")
             print(text[:3000])
         return False
 
@@ -173,9 +150,9 @@ def check_once(debug: bool = False) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(description="Чекер слотов на 5 км Night_Yaroslavl26")
-    parser.add_argument("--debug", action="store_true", help="Подробный вывод для настройки маркеров")
-    parser.add_argument("--loop", action="store_true", help="Бесконечный цикл с проверкой каждый час")
-    parser.add_argument("--interval", type=int, default=CHECK_INTERVAL_SECONDS, help="Интервал в секундах (по умолчанию 3600)")
+    parser.add_argument("--debug", action="store_true", help="Подробный вывод")
+    parser.add_argument("--loop", action="store_true", help="Бесконечный цикл")
+    parser.add_argument("--interval", type=int, default=CHECK_INTERVAL_SECONDS)
     args = parser.parse_args()
 
     if not args.loop:
